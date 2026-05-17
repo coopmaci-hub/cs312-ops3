@@ -1,0 +1,90 @@
+---
+- name: Setup Minecraft Server
+  hosts: minecraft
+  become: true
+
+  vars:
+    aws_region: us-east-1
+    ecr_repo: 905418052271.dkr.ecr.us-east-1.amazonaws.com/cs312-minecraft
+    image_tag: itzg/minecraft-server:java17
+    s3_bucket: cs312-minecraft-backups
+    s3_key: world-backup.tar.gz
+    data_dir: /data
+
+  tasks:
+
+    - name: Install system packages
+      apt:
+        name:
+          - docker.io
+          - awscli
+          - unzip
+        update_cache: yes
+        state: present
+
+    - name: Enable Docker service
+      systemd:
+        name: docker
+        enabled: yes
+        state: started
+
+    - name: Add ubuntu user to docker group
+      user:
+        name: ubuntu
+        groups: docker
+        append: yes
+
+    - name: Authenticate Docker to ECR
+      shell: |
+        aws ecr get-login-password --region {{ aws_region }} \
+        | docker login --username AWS --password-stdin {{ ecr_repo.split('/')[0] }}
+      environment:
+        AWS_DEFAULT_REGION: "{{ aws_region }}"
+
+    - name: Install Java
+      apt:
+        name: openjdk-17-jre-headless
+        state: present
+        update_cache: yes
+
+    - name: Pull Minecraft image
+      shell: |
+        docker pull {{ ecr_repo }}:{{ image_tag }}
+
+    - name: Create data directory
+      file:
+        path: "{{ data_dir }}"
+        state: directory
+        mode: "0755"
+
+    - name: Check if backup exists in S3
+      shell: |
+        aws s3 ls s3://{{ s3_bucket }}/{{ s3_key }}
+      register: s3_check
+      failed_when: false
+      environment:
+        AWS_DEFAULT_REGION: "{{ aws_region }}"
+
+    - name: Download world backup from S3
+      shell: |
+        aws s3 cp s3://{{ s3_bucket }}/{{ s3_key }} /tmp/world.tar.gz
+      when: s3_check.rc == 0
+      environment:
+        AWS_DEFAULT_REGION: "{{ aws_region }}"
+
+    - name: Extract world into data directory
+      shell: |
+        tar -xzf /tmp/world.tar.gz -C {{ data_dir }}
+      when: s3_check.rc == 0
+
+
+
+    - name: Run Minecraft container
+      shell: |
+        docker run -d \
+          --name minecraft \
+          --restart unless-stopped \
+          -p 25565:25565 \
+          -v {{ data_dir }}:/data \
+          -e EULA=TRUE \
+          {{ ecr_repo }}:{{ image_tag }}
