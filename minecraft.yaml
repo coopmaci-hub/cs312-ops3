@@ -1,0 +1,90 @@
+name: Build and Publish Minecraft Image to ECR
+
+on:
+  push:
+    tags:
+      - "*"
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY: cs312-minecraft
+
+jobs:
+  build-test-push:
+    runs-on: ubuntu-latest
+
+    steps:
+
+      # -------------------------
+      # Checkout repo
+      # -------------------------
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # -------------------------
+      # AWS credentials (Learner Lab requires session token)
+      # -------------------------
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # -------------------------
+      # Login to ECR
+      # -------------------------
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # -------------------------
+      # Set tag from git tag
+      # -------------------------
+      - name: Set image tag
+        run: echo "IMAGE_TAG=${GITHUB_REF_NAME}" >> $GITHUB_ENV
+
+      # =====================================================
+      # OPTION A: Build from Dockerfile (recommended if allowed)
+      # =====================================================
+      - name: Build Minecraft image
+        run: |
+          docker build -t $ECR_REPOSITORY:$IMAGE_TAG .
+
+      # =====================================================
+      # Smoke test (REQUIRED)
+      # =====================================================
+      - name: Smoke test Minecraft container
+        run: |
+          docker run -d --name mc-test \
+            -p 25565:25565 \
+            -e EULA=TRUE \
+            $ECR_REPOSITORY:$IMAGE_TAG
+
+          echo "Waiting for server startup..."
+          sleep 25
+
+          echo "Checking logs..."
+          if docker logs mc-test | grep -i "Done"; then
+            echo "Smoke test passed: Minecraft started successfully"
+          else
+            echo "Smoke test failed"
+            docker logs mc-test
+            exit 1
+          fi
+
+          docker rm -f mc-test
+
+      # -------------------------
+      # Push to ECR
+      # -------------------------
+      - name: Push image to ECR
+        run: |
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          ECR_URI=$ACCOUNT_ID.dkr.ecr.${AWS_REGION}.amazonaws.com/$ECR_REPOSITORY
+
+          docker tag $ECR_REPOSITORY:$IMAGE_TAG $ECR_URI:$IMAGE_TAG
+          docker tag $ECR_REPOSITORY:$IMAGE_TAG $ECR_URI:latest
+
+          docker push $ECR_URI:$IMAGE_TAG
+          docker push $ECR_URI:latest
